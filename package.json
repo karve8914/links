@@ -1,0 +1,21 @@
+{
+  "name": "article-url-checker",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "jszip": "3.10.2",
+    "pdfjs-dist": "6.3.289"
+  },
+  "devDependencies": {
+    "vite": "7.3.6"
+  },
+  "engines": {
+    "node": ">=20.19"
+  }
+}

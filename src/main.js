@@ -11,7 +11,7 @@ const app = document.querySelector('#app');
 app.innerHTML = `
   <main class="wrap">
     <section class="header">
-      <h1>文章網址連線檢查</h1>
+      <h1>文章網址連線檢查 v1.5.2</h1>
       <p>上傳 PDF 或 Word（DOCX），系統會在瀏覽器中擷取網址，再逐一檢查是否可開啟。結果只分成「可連線」與「無法連線」。</p>
     </section>
 
@@ -86,9 +86,9 @@ const WWW_RE = new RegExp(`www\\d*\\.${URL_BODY}+`, 'giu');
 // 這可避免把正文中的品牌／詞語（如 d.school、d.manifesto）誤判成網址。
 // 若只有兩段網域，但文件明確寫成 https://example.com 或 www.example.com，仍會正常辨識。
 const DOMAIN_LABEL = `[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?`;
-const DOMAIN_CORE = `(?:${DOMAIN_LABEL}\.){2,}[A-Za-z]{2,63}`;
-const BARE_DOMAIN_RE = new RegExp(`${DOMAIN_CORE}(?:\/${URL_BODY}*)?`, 'gu');
-const BARE_DOMAIN_FULL_RE = new RegExp(`^${DOMAIN_CORE}(?:\/${URL_BODY}*)?$`, 'iu');
+const DOMAIN_CORE = `(?:${DOMAIN_LABEL}\\.){2,}[A-Za-z]{2,63}`;
+const BARE_DOMAIN_RE = new RegExp(`${DOMAIN_CORE}(?:\\/${URL_BODY}*)?`, 'gu');
+const BARE_DOMAIN_FULL_RE = new RegExp(`^${DOMAIN_CORE}(?:\\/${URL_BODY}*)?$`, 'iu');
 const SIMPLE_TRAILING_RE = /[.,;:!?，。；：！？、」』】》〉〕]+$/u;
 
 function normalizeDocumentText(text) {

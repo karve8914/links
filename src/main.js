@@ -11,7 +11,7 @@ const app = document.querySelector('#app');
 app.innerHTML = `
   <main class="wrap">
     <section class="header">
-      <h1>文章網址連線檢查 v1.5.2</h1>
+      <h1>文章網址連線檢查 v1.5.4</h1>
       <p>上傳 PDF 或 Word（DOCX），系統會在瀏覽器中擷取網址，再逐一檢查是否可開啟。結果只分成「可連線」與「無法連線」。</p>
     </section>
 
@@ -240,6 +240,80 @@ async function extractDocx(file) {
   return found;
 }
 
+
+function buildPositionAwarePdfText(items) {
+  let out = '';
+  let previous = null;
+
+  for (const item of items) {
+    const str = item?.str || '';
+    if (!str) {
+      if (item?.hasEOL) out += '\n';
+      previous = item || previous;
+      continue;
+    }
+
+    const t = Array.isArray(item.transform) ? item.transform : [];
+    const x = Number(t[4]);
+    const y = Number(t[5]);
+    const width = Number(item.width) || 0;
+    const height = Math.max(
+      Math.abs(Number(t[3]) || 0),
+      Math.abs(Number(item.height) || 0),
+      1,
+    );
+
+    if (previous) {
+      const pt = Array.isArray(previous.transform) ? previous.transform : [];
+      const px = Number(pt[4]);
+      const py = Number(pt[5]);
+      const pwidth = Number(previous.width) || 0;
+      const pheight = Math.max(
+        Math.abs(Number(pt[3]) || 0),
+        Math.abs(Number(previous.height) || 0),
+        1,
+      );
+
+      if (previous.hasEOL) {
+        out += '\n';
+      } else if (
+        Number.isFinite(x) &&
+        Number.isFinite(y) &&
+        Number.isFinite(px) &&
+        Number.isFinite(py)
+      ) {
+        const lineTolerance = Math.max(height, pheight) * 0.45;
+        const sameLine = Math.abs(y - py) <= lineTolerance;
+
+        if (!sameLine) {
+          // PDF.js 有時沒有 hasEOL；Y 座標已有明顯變化時仍視為換行。
+          out += '\n';
+        } else {
+          const previousEndX = px + pwidth;
+          const gap = x - previousEndX;
+          const gapThreshold = Math.max(2, Math.min(height, pheight) * 0.28);
+
+          if (gap > gapThreshold) {
+            // 同一列但相隔明顯：通常是表格另一欄或下一個文字區塊。
+            // 插入空白，避免「網址 + 下一欄文字」被黏成假的網址路徑。
+            out += ' ';
+          }
+          // gap 很小或略為負值時不插空白：
+          // 保留 PDF 將同一網址拆成多個相鄰文字 item 時的重組能力。
+        }
+      } else {
+        // 缺少座標資料時採保守做法，避免任意黏字。
+        out += ' ';
+      }
+    }
+
+    out += str;
+    previous = item;
+  }
+
+  return out;
+}
+
 async function extractPdf(file) {
   const data = new Uint8Array(await file.arrayBuffer());
   const pdf = await pdfjsLib.getDocument({ data }).promise;
@@ -261,9 +335,7 @@ async function extractPdf(file) {
     // 最終不把兩種策略的結果相加，而是取同一 URL 的較大出現次數，
     // 避免同一個實際網址被解析器自己重複計算。
     const spacedText = content.items.map((item) => item.str || '').join(' ');
-    const lineAwareText = content.items
-      .map((item) => `${item.str || ''}${item.hasEOL ? '\n' : ''}`)
-      .join('');
+    const lineAwareText = buildPositionAwarePdfText(content.items);
 
     const spacedRows = extractUrlsFromText(spacedText, file.name, `第 ${pageNo} 頁`);
     const lineRows = extractUrlsFromText(lineAwareText, file.name, `第 ${pageNo} 頁`);

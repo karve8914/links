@@ -64,10 +64,14 @@ async function probe(raw, timeoutMs = 9000) {
       clearTimeout(timer);
       try { await response.body?.cancel(); } catch {}
 
-      // 對「網址是否仍可使用」做寬鬆判定：
-      // 2xx：正常；3xx：跟隨轉址；401/403/429：站點仍存在，只是限制自動存取，因此視為可連線。
+      // 對「網址是否可連線」採瀏覽器使用情境的寬鬆判定：
+      // 2xx：可連線。
+      // 3xx：優先跟隨轉址；若沒有 Location，也代表伺服器確實有回應。
+      // 404 / 410：目標頁面明確不存在，判定不可連線。
+      // 其他 HTTP 回應（包含 401 / 403 / 429 / 5xx 等）代表網站伺服器有實際回應；
+      // 有些 CDN / 防機器人服務會對 Vercel 這類雲端請求回傳非 2xx，但一般瀏覽器仍可正常開啟，
+      // 因此依本工具「能否連到網址」的目的，視為可連線。
       if (response.status >= 200 && response.status < 300) return true;
-      if ([401, 403, 429].includes(response.status)) return true;
 
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location');
@@ -76,7 +80,9 @@ async function probe(raw, timeoutMs = 9000) {
         continue;
       }
 
-      return false;
+      if ([404, 410].includes(response.status)) return false;
+
+      return true;
     } catch {
       clearTimeout(timer);
       return false;

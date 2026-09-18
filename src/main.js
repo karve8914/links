@@ -82,9 +82,13 @@ const HIDDEN_CHAR_RE = /[\u00AD\u200B-\u200D\u2060\uFEFF]/g;
 const URL_BODY = `[A-Za-z0-9\\-._~:/?#\\[\\]@$&'()*+=%]`;
 const PROTOCOL_RE = new RegExp(`https?:\\/\\/${URL_BODY}+`, 'giu');
 const WWW_RE = new RegExp(`www\\d*\\.${URL_BODY}+`, 'giu');
-const DOMAIN_CORE = `(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}`;
-const BARE_DOMAIN_RE = new RegExp(`${DOMAIN_CORE}(?:\\/${URL_BODY}*)?`, 'gu');
-const BARE_DOMAIN_FULL_RE = new RegExp(`^${DOMAIN_CORE}(?:\\/${URL_BODY}*)?$`, 'iu');
+// 裸網域採較保守判定：至少三段，例如 moe.gov.tw、ghg.tgpf.org.tw。
+// 這可避免把正文中的品牌／詞語（如 d.school、d.manifesto）誤判成網址。
+// 若只有兩段網域，但文件明確寫成 https://example.com 或 www.example.com，仍會正常辨識。
+const DOMAIN_LABEL = `[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?`;
+const DOMAIN_CORE = `(?:${DOMAIN_LABEL}\.){2,}[A-Za-z]{2,63}`;
+const BARE_DOMAIN_RE = new RegExp(`${DOMAIN_CORE}(?:\/${URL_BODY}*)?`, 'gu');
+const BARE_DOMAIN_FULL_RE = new RegExp(`^${DOMAIN_CORE}(?:\/${URL_BODY}*)?$`, 'iu');
 const SIMPLE_TRAILING_RE = /[.,;:!?，。；：！？、」』】》〉〕]+$/u;
 
 function normalizeDocumentText(text) {

@@ -49,12 +49,12 @@ app.innerHTML = `
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th style="width:60px">序號</th><th style="width:170px">檔案</th><th style="width:120px">PDF 頁碼</th><th>網址</th><th style="width:120px">結果</th></tr>
+            <tr><th style="width:60px">序號</th><th style="width:170px">檔案</th><th style="width:120px">PDF 頁碼</th><th>網址</th><th style="width:120px">結果</th><th style="width:190px">YouTube 影片</th></tr>
           </thead>
-          <tbody id="tbody"><tr><td colspan="5" class="empty">尚無檢查結果</td></tr></tbody>
+          <tbody id="tbody"><tr><td colspan="6" class="empty">尚無檢查結果</td></tr></tbody>
         </table>
       </div>
-      <div class="note">同一檔案中的相同網址只保留一列；PDF 頁碼欄會列出該網址在同一份 PDF 出現的全部頁數，例如 3、7。文件內容會在你的瀏覽器本機解析；後端只會收到擷取後的網址，不會收到 PDF 或 Word 檔案本身。</div>
+      <div class="note">同一檔案中的相同網址只保留一列；PDF 頁碼欄會列出該網址在同一份 PDF 出現的全部頁數，例如 3、7。YouTube 網址會再以官方播放器 API 判斷影片是否可嵌入播放；一般網址維持「可連線／無法連線」。文件內容會在你的瀏覽器本機解析；後端只會收到擷取後的網址，不會收到 PDF 或 Word 檔案本身。</div>
     </section>
   </main>
 `;
@@ -338,6 +338,176 @@ function mergeByFileAndUrl(items) {
   }));
 }
 
+const YOUTUBE_HOST_RE = /(^|\.)(youtube\.com|youtube-nocookie\.com|youtu\.be)$/i;
+let youtubeApiPromise = null;
+const youtubeStatusCache = new Map();
+
+function getYouTubeVideoId(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    const host = url.hostname.toLowerCase().replace(/^www\./, '');
+    if (!YOUTUBE_HOST_RE.test(host)) return '';
+
+    let id = '';
+    if (host === 'youtu.be') {
+      id = url.pathname.split('/').filter(Boolean)[0] || '';
+    } else if (host.endsWith('youtube.com') || host.endsWith('youtube-nocookie.com')) {
+      if (url.pathname === '/watch') {
+        id = url.searchParams.get('v') || '';
+      } else {
+        const parts = url.pathname.split('/').filter(Boolean);
+        if (['shorts', 'live', 'embed'].includes(parts[0])) id = parts[1] || '';
+      }
+    }
+
+    return /^[A-Za-z0-9_-]{11}$/.test(id) ? id : '';
+  } catch {
+    return '';
+  }
+}
+
+function isYouTubeUrl(url) {
+  return Boolean(getYouTubeVideoId(url));
+}
+
+function loadYouTubeIframeApi() {
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+  if (youtubeApiPromise) return youtubeApiPromise;
+
+  youtubeApiPromise = new Promise((resolve, reject) => {
+    const previousReady = window.onYouTubeIframeAPIReady;
+    const timeout = setTimeout(() => reject(new Error('YouTube Player API 載入逾時')), 12000);
+
+    window.onYouTubeIframeAPIReady = () => {
+      clearTimeout(timeout);
+      try { previousReady?.(); } catch {}
+      resolve(window.YT);
+    };
+
+    const existing = document.querySelector('script[data-youtube-iframe-api]');
+    if (!existing) {
+      const script = document.createElement('script');
+      script.src = 'https://www.youtube.com/iframe_api';
+      script.async = true;
+      script.dataset.youtubeIframeApi = '1';
+      script.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error('YouTube Player API 無法載入'));
+      };
+      document.head.appendChild(script);
+    }
+  });
+
+  return youtubeApiPromise;
+}
+
+function youtubeErrorStatus(code) {
+  if (code === 100) return '影片不存在／私人';
+  if (code === 101 || code === 150) return '存在但禁止嵌入播放';
+  if (code === 5) return '無法在播放器播放';
+  if (code === 2) return '影片 ID 無效';
+  if (code === 153) return '無法確認（播放器識別限制）';
+  return '無法確認';
+}
+
+async function checkYouTubePlayable(url) {
+  const videoId = getYouTubeVideoId(url);
+  if (!videoId) return '—';
+  if (youtubeStatusCache.has(videoId)) return youtubeStatusCache.get(videoId);
+
+  const checkPromise = (async () => {
+    let host;
+    let player;
+    let settled = false;
+
+    try {
+      const YT = await loadYouTubeIframeApi();
+
+      return await new Promise((resolve) => {
+        const finish = (status) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          try { player?.destroy(); } catch {}
+          try { host?.remove(); } catch {}
+          resolve(status);
+        };
+
+        host = document.createElement('div');
+        host.className = 'yt-probe';
+        document.body.appendChild(host);
+
+        const timer = setTimeout(() => finish('無法確認'), 12000);
+
+        player = new YT.Player(host, {
+          width: '200',
+          height: '200',
+          videoId,
+          playerVars: {
+            playsinline: 1,
+            controls: 0,
+            origin: window.location.origin,
+          },
+          events: {
+            onReady: (event) => {
+              try { event.target.cueVideoById(videoId); }
+              catch { finish('無法確認'); }
+            },
+            onStateChange: (event) => {
+              if (event.data === YT.PlayerState.CUED) finish('可播放');
+            },
+            onError: (event) => finish(youtubeErrorStatus(Number(event.data))),
+          },
+        });
+      });
+    } catch {
+      try { player?.destroy(); } catch {}
+      try { host?.remove(); } catch {}
+      return '無法確認';
+    }
+  })();
+
+  youtubeStatusCache.set(videoId, checkPromise);
+  const status = await checkPromise;
+  youtubeStatusCache.set(videoId, status);
+  return status;
+}
+
+async function enrichYouTubeStatuses(rows, onProgress) {
+  const targets = rows.filter((row) => isYouTubeUrl(row.url));
+  if (!targets.length) return rows.map((row) => ({ ...row, youtubeStatus: '—' }));
+
+  const statusById = new Map();
+  const unique = [];
+  for (const row of targets) {
+    const id = getYouTubeVideoId(row.url);
+    if (id && !statusById.has(id)) {
+      statusById.set(id, null);
+      unique.push({ id, url: row.url });
+    }
+  }
+
+  let done = 0;
+  for (const item of unique) {
+    const status = await checkYouTubePlayable(item.url);
+    statusById.set(item.id, status);
+    done += 1;
+    onProgress?.(done, unique.length);
+  }
+
+  return rows.map((row) => {
+    const id = getYouTubeVideoId(row.url);
+    return { ...row, youtubeStatus: id ? (statusById.get(id) || '無法確認') : '—' };
+  });
+}
+
+function youtubeBadgeClass(status) {
+  if (status === '可播放') return 'yt-ok';
+  if (status === '—') return 'yt-na';
+  if (status === '無法確認' || status.startsWith('無法確認')) return 'yt-warn';
+  return 'yt-bad';
+}
+
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -385,7 +555,7 @@ function renderResults() {
   el('bad').textContent = results.length - ok;
 
   if (!results.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">尚無檢查結果</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">尚無檢查結果</td></tr>';
     exportBtn.disabled = true;
     copyBadBtn.disabled = true;
     return;
@@ -398,6 +568,7 @@ function renderResults() {
       <td>${r.pages?.length ? escapeHtml(r.pages.join('、')) : '—'}</td>
       <td class="url">${escapeHtml(r.url)}</td>
       <td><span class="badge ${r.ok ? 'ok' : 'bad'}">${r.ok ? '可連線' : '無法連線'}</span></td>
+      <td><span class="badge ${youtubeBadgeClass(r.youtubeStatus || '—')}">${escapeHtml(r.youtubeStatus || '—')}</span></td>
     </tr>
   `).join('');
 
@@ -477,12 +648,22 @@ checkBtn.addEventListener('click', async () => {
       statusText.textContent = `檢查中 ${done} / ${rows.length}`;
       const data = await checkBatch(batch);
       const byUrl = new Map(data.results.map((r) => [r.url, r.ok]));
-      for (const row of batch) results.push({ ...row, ok: Boolean(byUrl.get(row.url)) });
+      for (const row of batch) results.push({ ...row, ok: Boolean(byUrl.get(row.url)), youtubeStatus: isYouTubeUrl(row.url) ? '檢查中…' : '—' });
       done += batch.length;
       setProgress(done, rows.length);
       renderResults();
     }
-    statusText.textContent = `完成，共 ${rows.length} 筆不重複網址`;
+    const youtubeCount = results.filter((row) => isYouTubeUrl(row.url)).length;
+    if (youtubeCount) {
+      statusText.textContent = `正在檢查 YouTube 影片…`;
+      results = await enrichYouTubeStatuses(results, (ytDone, ytTotal) => {
+        statusText.textContent = `檢查 YouTube 影片 ${ytDone} / ${ytTotal}`;
+        renderResults();
+      });
+      renderResults();
+    }
+
+    statusText.textContent = `完成，共 ${rows.length} 筆不重複網址${youtubeCount ? `，其中 ${youtubeCount} 筆為 YouTube 網址` : ''}`;
   } catch (error) {
     console.error(error);
     statusText.textContent = '處理失敗';
@@ -496,8 +677,8 @@ checkBtn.addEventListener('click', async () => {
 });
 
 exportBtn.addEventListener('click', () => {
-  const rows = [['序號', '來源檔案', 'PDF 頁碼', '網址', '結果']];
-  results.forEach((r, i) => rows.push([i + 1, (r.sources || [r.source]).join('、'), r.pages?.length ? r.pages.join('、') : '', r.url, r.ok ? '可連線' : '無法連線']));
+  const rows = [['序號', '來源檔案', 'PDF 頁碼', '網址', '結果', 'YouTube 影片狀態']];
+  results.forEach((r, i) => rows.push([i + 1, (r.sources || [r.source]).join('、'), r.pages?.length ? r.pages.join('、') : '', r.url, r.ok ? '可連線' : '無法連線', r.youtubeStatus || '—']));
   const csv = '\uFEFF' + rows.map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   const href = URL.createObjectURL(blob);

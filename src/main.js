@@ -11,8 +11,8 @@ const app = document.querySelector('#app');
 app.innerHTML = `
   <main class="wrap">
     <section class="header">
-      <h1>文章網址連線檢查 v1.5.4</h1>
-      <p>上傳 PDF 或 Word（DOCX），系統會在瀏覽器中擷取網址，再逐一檢查是否可開啟。結果只分成「可連線」與「無法連線」。</p>
+      <h1>文章網址連線檢查 v1.5.6</h1>
+      <p>上傳 PDF 或 Word（DOCX），系統會在瀏覽器中擷取網址，再逐一檢查是否可開啟。結果分成「可連線」、「無法連線」與「需人工確認」。</p>
     </section>
 
     <section class="card">
@@ -36,6 +36,7 @@ app.innerHTML = `
         <div class="stat"><span>共檢查</span><b id="total">0</b></div>
         <div class="stat"><span>可連線</span><b id="ok">0</b></div>
         <div class="stat"><span>無法連線</span><b id="bad">0</b></div>
+        <div class="stat"><span>需人工確認</span><b id="review">0</b></div>
       </div>
       <div class="progress"><div id="progressBar"></div></div>
     </section>
@@ -54,7 +55,7 @@ app.innerHTML = `
           <tbody id="tbody"><tr><td colspan="6" class="empty">尚無檢查結果</td></tr></tbody>
         </table>
       </div>
-      <div class="note">同一檔案中的相同網址只保留一列；PDF 頁碼欄會列出該網址在同一份 PDF 出現的全部頁數，例如 3、7。YouTube 網址會再以官方播放器 API 判斷影片是否可嵌入播放；一般網址維持「可連線／無法連線」。文件內容會在你的瀏覽器本機解析；後端只會收到擷取後的網址，不會收到 PDF 或 Word 檔案本身。</div>
+      <div class="note">同一檔案中的相同網址只保留一列；PDF 頁碼欄會列出該網址在同一份 PDF 出現的全部頁數，例如 3、7。YouTube 網址會再以官方播放器 API 判斷影片是否可嵌入播放；一般網址分為「可連線／無法連線／需人工確認」。全華 CHWAhlink.asp?hlId=… 會追蹤實際目的網址後再判定。後端若因雲端來源限制無法確定，才會由目前使用者的瀏覽器進行第二次連線測試。文件內容會在你的瀏覽器本機解析；後端只會收到擷取後的網址，不會收到 PDF 或 Word 檔案本身。</div>
     </section>
   </main>
 `;
@@ -624,11 +625,80 @@ function setProgress(done, total) {
   progressBar.style.width = total ? `${Math.round((done / total) * 100)}%` : '0%';
 }
 
+function connectionLabel(status) {
+  if (status === 'ok') return '可連線';
+  if (status === 'bad') return '無法連線';
+  return '需人工確認';
+}
+
+function connectionBadgeClass(status) {
+  if (status === 'ok') return 'ok';
+  if (status === 'bad') return 'bad';
+  return 'warn';
+}
+
+async function browserReachabilityProbe(rawUrl, timeoutMs = 8000) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+
+  const candidates = [];
+  // 部署頁面通常是 HTTPS。HTTP 網址會被瀏覽器 Mixed Content 阻擋，
+  // 所以若原網址為 http://，先嘗試同主機的 https:// 版本。
+  if (parsed.protocol === 'http:') {
+    const httpsUrl = new URL(parsed.href);
+    httpsUrl.protocol = 'https:';
+    candidates.push(httpsUrl.href);
+    if (window.location.protocol !== 'https:') candidates.push(parsed.href);
+  } else {
+    candidates.push(parsed.href);
+  }
+
+  for (const candidate of [...new Set(candidates)]) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      // no-cors 的目的不是讀取網頁內容，而是確認使用者目前的瀏覽器
+      // 是否能對該站建立網路請求。回應內容與 HTTP 狀態碼不會被前端讀取。
+      const response = await fetch(candidate, {
+        method: 'GET',
+        mode: 'no-cors',
+        redirect: 'follow',
+        cache: 'no-store',
+        credentials: 'omit',
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      try { await response.body?.cancel(); } catch {}
+      return true;
+    } catch {
+      clearTimeout(timer);
+    }
+  }
+
+  return false;
+}
+
+async function resolveConnectionStatuses(apiResults) {
+  return Promise.all(apiResults.map(async (item) => {
+    if (item.status !== 'uncertain') return item;
+    // 若後端已從 CHWA 中介頁解析出實際目的網址，瀏覽器二次驗證改測目的網址。
+    const browserOk = await browserReachabilityProbe(item.probeUrl || item.url);
+    return { ...item, status: browserOk ? 'ok' : 'review' };
+  }));
+}
+
 function renderResults() {
   el('total').textContent = results.length;
-  const ok = results.filter((r) => r.ok).length;
+  const ok = results.filter((r) => r.connectionStatus === 'ok').length;
+  const bad = results.filter((r) => r.connectionStatus === 'bad').length;
+  const review = results.filter((r) => r.connectionStatus === 'review').length;
   el('ok').textContent = ok;
-  el('bad').textContent = results.length - ok;
+  el('bad').textContent = bad;
+  el('review').textContent = review;
 
   if (!results.length) {
     tbody.innerHTML = '<tr><td colspan="6" class="empty">尚無檢查結果</td></tr>';
@@ -643,13 +713,13 @@ function renderResults() {
       <td>${escapeHtml((r.sources || [r.source]).join('、'))}</td>
       <td>${r.pages?.length ? escapeHtml(r.pages.join('、')) : '—'}</td>
       <td class="url">${escapeHtml(r.url)}</td>
-      <td><span class="badge ${r.ok ? 'ok' : 'bad'}">${r.ok ? '可連線' : '無法連線'}</span></td>
+      <td><span class="badge ${connectionBadgeClass(r.connectionStatus)}">${connectionLabel(r.connectionStatus)}</span></td>
       <td><span class="badge ${youtubeBadgeClass(r.youtubeStatus || '—')}">${escapeHtml(r.youtubeStatus || '—')}</span></td>
     </tr>
   `).join('');
 
   exportBtn.disabled = false;
-  copyBadBtn.disabled = results.every((r) => r.ok);
+  copyBadBtn.disabled = results.every((r) => r.connectionStatus !== 'bad');
 }
 
 function escapeHtml(text) {
@@ -723,8 +793,9 @@ checkBtn.addEventListener('click', async () => {
       const batch = rows.slice(i, i + batchSize);
       statusText.textContent = `檢查中 ${done} / ${rows.length}`;
       const data = await checkBatch(batch);
-      const byUrl = new Map(data.results.map((r) => [r.url, r.ok]));
-      for (const row of batch) results.push({ ...row, ok: Boolean(byUrl.get(row.url)), youtubeStatus: isYouTubeUrl(row.url) ? '檢查中…' : '—' });
+      const resolved = await resolveConnectionStatuses(data.results);
+      const byUrl = new Map(resolved.map((r) => [r.url, r.status]));
+      for (const row of batch) results.push({ ...row, connectionStatus: byUrl.get(row.url) || 'review', youtubeStatus: isYouTubeUrl(row.url) ? '檢查中…' : '—' });
       done += batch.length;
       setProgress(done, rows.length);
       renderResults();
@@ -754,7 +825,7 @@ checkBtn.addEventListener('click', async () => {
 
 exportBtn.addEventListener('click', () => {
   const rows = [['序號', '來源檔案', 'PDF 頁碼', '網址', '結果', 'YouTube 影片狀態']];
-  results.forEach((r, i) => rows.push([i + 1, (r.sources || [r.source]).join('、'), r.pages?.length ? r.pages.join('、') : '', r.url, r.ok ? '可連線' : '無法連線', r.youtubeStatus || '—']));
+  results.forEach((r, i) => rows.push([i + 1, (r.sources || [r.source]).join('、'), r.pages?.length ? r.pages.join('、') : '', r.url, connectionLabel(r.connectionStatus), r.youtubeStatus || '—']));
   const csv = '\uFEFF' + rows.map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   const href = URL.createObjectURL(blob);
@@ -766,7 +837,7 @@ exportBtn.addEventListener('click', () => {
 });
 
 copyBadBtn.addEventListener('click', async () => {
-  const text = results.filter((r) => !r.ok).map((r) => r.url).join('\n');
+  const text = results.filter((r) => r.connectionStatus === 'bad').map((r) => r.url).join('\n');
   await navigator.clipboard.writeText(text);
   const old = copyBadBtn.textContent;
   copyBadBtn.textContent = '已複製';
